@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useCallback, useMemo } from 'react';
-import { ZoomIn, ZoomOut, MoveHorizontal } from 'lucide-react';
+import { ZoomIn, ZoomOut, MoveHorizontal, Eye, EyeOff } from 'lucide-react';
 import {
   createChart,
   IChartApi,
@@ -44,6 +44,7 @@ type SubChartType = 'volume' | 'macd' | 'rsi' | 'kdj';
 const MA_COLORS = ['#facc15', '#a855f7', '#f97316', '#38bdf8', '#f43f5e'];
 const EMA_COLORS = ['#06b6d4', '#ec4899'];
 const BOLL_COLOR = '#e91e63';
+const CHART_FONT_FAMILY = 'Menlo, Monaco, Consolas, monospace';
 
 // 批量移除 series 并清空 ref
 function clearSeriesArray(chart: IChartApi, refs: React.MutableRefObject<ISeriesApi<SeriesType, Time>[]>) {
@@ -173,10 +174,15 @@ export const StockChartLW: React.FC<StockChartProps> = ({ data, period, onPeriod
     if (!chartContainerRef.current || !volumeContainerRef.current) return;
 
     const chart = createChart(chartContainerRef.current, {
-      layout: { background: { color: '#0f172a' }, textColor: '#94a3b8', attributionLogo: false },
+      layout: {
+        background: { color: '#0f172a' },
+        textColor: '#94a3b8',
+        attributionLogo: false,
+        fontFamily: CHART_FONT_FAMILY,
+      },
       grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: '#1e293b', scaleMargins: { top: 0.1, bottom: 0.1 } },
+      rightPriceScale: { borderColor: '#1e293b', scaleMargins: { top: 0.15, bottom: 0.15 } },
       timeScale: { borderColor: '#1e293b', timeVisible: true, secondsVisible: false },
       localization: { timeFormatter: (time: Time) => typeof time === 'number' ? formatTimestamp(time) : String(time) },
       handleScroll: true,
@@ -184,9 +190,14 @@ export const StockChartLW: React.FC<StockChartProps> = ({ data, period, onPeriod
     });
 
     const volumeChart = createChart(volumeContainerRef.current, {
-      layout: { background: { color: '#0f172a' }, textColor: '#94a3b8', attributionLogo: false },
+      layout: {
+        background: { color: '#0f172a' },
+        textColor: '#94a3b8',
+        attributionLogo: false,
+        fontFamily: CHART_FONT_FAMILY,
+      },
       grid: { vertLines: { color: '#1e293b' }, horzLines: { color: '#1e293b' } },
-      rightPriceScale: { borderColor: '#1e293b', scaleMargins: { top: 0.1, bottom: 0 } },
+      rightPriceScale: { borderColor: '#1e293b', scaleMargins: { top: 0.15, bottom: 0.1 } },
       timeScale: { borderColor: '#1e293b', timeVisible: true, secondsVisible: false },
       localization: { timeFormatter: (time: Time) => typeof time === 'number' ? formatTimestamp(time) : String(time) },
       handleScroll: true,
@@ -241,7 +252,11 @@ export const StockChartLW: React.FC<StockChartProps> = ({ data, period, onPeriod
     if (!chart || !volumeChart) return;
 
     const layoutOpts = {
-      layout: { background: { color: chartColors.background }, textColor: chartColors.textColor },
+      layout: {
+        background: { color: chartColors.background },
+        textColor: chartColors.textColor,
+        fontFamily: CHART_FONT_FAMILY,
+      },
       grid: { vertLines: { color: chartColors.gridColor }, horzLines: { color: chartColors.gridColor } },
       rightPriceScale: { borderColor: chartColors.gridColor },
       timeScale: { borderColor: chartColors.gridColor },
@@ -530,21 +545,43 @@ export const StockChartLW: React.FC<StockChartProps> = ({ data, period, onPeriod
     const chart = chartRef.current;
     if (!chart) return;
 
+    const getSeriesPrice = (raw: unknown): number | null => {
+      if (!raw || typeof raw !== 'object') return null;
+      const record = raw as Record<string, unknown>;
+      if (typeof record.value === 'number') return record.value;
+      if (typeof record.close === 'number') return record.close;
+      return null;
+    };
+
     const clickHandler = (param: MouseEventParams<Time>) => {
       if (!param.seriesData || !param.point) {
         setIndicatorPopup(null);
         return;
       }
-      // 遍历点击到的 series，查找是否命中指标线
-      for (const [series] of param.seriesData) {
-        const indType = seriesIndicatorMap.current.get(series as ISeriesApi<SeriesType, Time>);
-        if (indType) {
-          setIndicatorPopup({ type: indType, x: param.point.x, y: param.point.y });
-          return;
+      const clickY = param.point.y;
+      const HIT_THRESHOLD = 12; // px
+      let bestDist = Infinity;
+      let bestType: MainIndicatorType | null = null;
+
+      for (const [series, data] of param.seriesData) {
+        const indType = seriesIndicatorMap.current.get(series);
+        if (!indType) continue;
+        const price = getSeriesPrice(data);
+        if (price == null) continue;
+        const coord = series.priceToCoordinate(price);
+        if (coord == null) continue;
+        const dist = Math.abs(coord - clickY);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestType = indType;
         }
       }
-      // 未命中指标线，关闭面板
-      setIndicatorPopup(null);
+
+      if (bestType && bestDist <= HIT_THRESHOLD) {
+        setIndicatorPopup({ type: bestType, x: param.point.x, y: param.point.y });
+      } else {
+        setIndicatorPopup(null);
+      }
     };
 
     chart.subscribeClick(clickHandler);
@@ -583,7 +620,7 @@ export const StockChartLW: React.FC<StockChartProps> = ({ data, period, onPeriod
   const hasData = safeData.length > 0;
 
   return (
-    <div className="h-full w-full fin-panel flex flex-col relative" onClick={() => setIndicatorPopup(null)}>
+    <div className="h-full w-full fin-panel flex flex-col relative" onMouseDown={() => setIndicatorPopup(null)}>
       {/* 加载提示（叠加在图表上方） */}
       {!hasData && (
         <div className="absolute inset-0 z-20 flex items-center justify-center fin-panel">
@@ -672,6 +709,69 @@ export const StockChartLW: React.FC<StockChartProps> = ({ data, period, onPeriod
       <div className="flex-1 min-h-0 relative">
         <div className="absolute inset-0" ref={chartContainerRef} />
 
+        {/* 主图指标图例 - TradingView 风格 */}
+        {!isIntraday && (
+          <div className="absolute top-1 left-1 z-20 flex flex-col gap-0.5 pointer-events-auto">
+            {/* MA */}
+            <div className="flex items-center gap-1.5 text-[11px] font-mono">
+              <button
+                className="opacity-60 hover:opacity-100 transition-opacity"
+                onClick={() => updateIndicator('ma', { enabled: !indicatorConfig.ma.enabled })}
+                title={indicatorConfig.ma.enabled ? '隐藏 MA' : '显示 MA'}
+              >
+                {indicatorConfig.ma.enabled
+                  ? <Eye size={12} className="text-yellow-500" />
+                  : <EyeOff size={12} className={colors.isDark ? 'text-slate-600' : 'text-slate-400'} />}
+              </button>
+              {indicatorConfig.ma.enabled && indicatorConfig.ma.periods.map((p, i) => (
+                <span key={p} style={{ color: MA_COLORS[i % MA_COLORS.length] }}>
+                  MA{p}
+                </span>
+              ))}
+              {!indicatorConfig.ma.enabled && (
+                <span className={colors.isDark ? 'text-slate-600 line-through' : 'text-slate-400 line-through'}>MA</span>
+              )}
+            </div>
+            {/* EMA */}
+            <div className="flex items-center gap-1.5 text-[11px] font-mono">
+              <button
+                className="opacity-60 hover:opacity-100 transition-opacity"
+                onClick={() => updateIndicator('ema', { enabled: !indicatorConfig.ema.enabled })}
+                title={indicatorConfig.ema.enabled ? '隐藏 EMA' : '显示 EMA'}
+              >
+                {indicatorConfig.ema.enabled
+                  ? <Eye size={12} className="text-cyan-500" />
+                  : <EyeOff size={12} className={colors.isDark ? 'text-slate-600' : 'text-slate-400'} />}
+              </button>
+              {indicatorConfig.ema.enabled && indicatorConfig.ema.periods.map((p, i) => (
+                <span key={p} style={{ color: EMA_COLORS[i % EMA_COLORS.length] }}>
+                  EMA{p}
+                </span>
+              ))}
+              {!indicatorConfig.ema.enabled && (
+                <span className={colors.isDark ? 'text-slate-600 line-through' : 'text-slate-400 line-through'}>EMA</span>
+              )}
+            </div>
+            {/* BOLL */}
+            <div className="flex items-center gap-1.5 text-[11px] font-mono">
+              <button
+                className="opacity-60 hover:opacity-100 transition-opacity"
+                onClick={() => updateIndicator('boll', { enabled: !indicatorConfig.boll.enabled })}
+                title={indicatorConfig.boll.enabled ? '隐藏 BOLL' : '显示 BOLL'}
+              >
+                {indicatorConfig.boll.enabled
+                  ? <Eye size={12} style={{ color: BOLL_COLOR }} />
+                  : <EyeOff size={12} className={colors.isDark ? 'text-slate-600' : 'text-slate-400'} />}
+              </button>
+              {indicatorConfig.boll.enabled ? (
+                <span style={{ color: BOLL_COLOR }}>BOLL({indicatorConfig.boll.period},{indicatorConfig.boll.multiplier})</span>
+              ) : (
+                <span className={colors.isDark ? 'text-slate-600 line-through' : 'text-slate-400 line-through'}>BOLL</span>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* 指标快捷配置浮动面板 */}
         {indicatorPopup && (
           <div
@@ -685,6 +785,7 @@ export const StockChartLW: React.FC<StockChartProps> = ({ data, period, onPeriod
               top: Math.min(indicatorPopup.y, (chartContainerRef.current?.clientHeight || 200) - 120),
             }}
             onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
           >
             {/* MA / EMA 配置（共用结构） */}
             {(indicatorPopup.type === 'ma' || indicatorPopup.type === 'ema') && (() => {
