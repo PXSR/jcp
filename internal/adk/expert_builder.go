@@ -40,8 +40,8 @@ func NewExpertAgentBuilderFull(llm model.LLM, aiConfig *models.AIConfig, registr
 }
 
 // BuildAgentWithContext 根据配置构建 LLM Agent（支持引用上下文）
-func (b *ExpertAgentBuilder) BuildAgentWithContext(config *models.AgentConfig, stock *models.Stock, query string, replyContent string, position *models.StockPosition) (agent.Agent, error) {
-	instruction := b.buildInstructionWithContext(config, stock, query, replyContent, position)
+func (b *ExpertAgentBuilder) BuildAgentWithContext(config *models.AgentConfig, stock *models.Stock, query string, replyContent string, coreContext string, position *models.StockPosition) (agent.Agent, error) {
+	instruction := b.buildInstructionWithContext(config, stock, query, replyContent, coreContext, position)
 
 	// 获取 Agent 配置的工具
 	var agentTools []tool.Tool
@@ -85,7 +85,7 @@ func (b *ExpertAgentBuilder) BuildAgentWithContext(config *models.AgentConfig, s
 }
 
 // buildInstructionWithContext 构建 Agent 指令（支持引用上下文）
-func (b *ExpertAgentBuilder) buildInstructionWithContext(config *models.AgentConfig, stock *models.Stock, query string, replyContent string, position *models.StockPosition) string {
+func (b *ExpertAgentBuilder) buildInstructionWithContext(config *models.AgentConfig, stock *models.Stock, query string, replyContent string, coreContext string, position *models.StockPosition) string {
 	baseInstruction := config.Instruction
 	if baseInstruction == "" {
 		baseInstruction = fmt.Sprintf("你是一位%s，名字是%s。", config.Role, config.Name)
@@ -151,6 +151,13 @@ func (b *ExpertAgentBuilder) buildInstructionWithContext(config *models.AgentCon
 用户持仓: %d股，成本价 %.2f
 持仓市值: %.2f，盈亏: %.2f (%.2f%%)
 `, position.Shares, position.CostPrice, marketValue, profitLoss, profitPercent)
+	}
+
+	if strings.TrimSpace(coreContext) != "" {
+		prompt += fmt.Sprintf(`
+【核心数据包】
+%s
+`, coreContext)
 	}
 
 	// 如果有引用内容，加入上下文

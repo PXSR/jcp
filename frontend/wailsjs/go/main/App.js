@@ -74,12 +74,28 @@ export function GetAvailableTools() {
   return window['go']['main']['App']['GetAvailableTools']();
 }
 
+export function GetBoardFundFlow(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetBoardFundFlow'](arg1, arg2, arg3);
+}
+
+export function GetBoardLeaders(arg1, arg2) {
+  return window['go']['main']['App']['GetBoardLeaders'](arg1, arg2);
+}
+
 export function GetConfig() {
   return window['go']['main']['App']['GetConfig']();
 }
 
 export function GetCurrentVersion() {
   return window['go']['main']['App']['GetCurrentVersion']();
+}
+
+export function GetF10Overview(arg1) {
+  return window['go']['main']['App']['GetF10Overview'](arg1);
+}
+
+export function GetF10Valuation(arg1) {
+  return window['go']['main']['App']['GetF10Valuation'](arg1);
 }
 
 export function GetHotTrend(arg1) {
@@ -114,6 +130,14 @@ export function GetMCPStatus() {
   return window['go']['main']['App']['GetMCPStatus']();
 }
 
+export function GetMarketIndices() {
+  return window['go']['main']['App']['GetMarketIndices']();
+}
+
+export function GetMarketStatus() {
+  return window['go']['main']['App']['GetMarketStatus']();
+}
+
 export function GetOpenClawStatus() {
   return window['go']['main']['App']['GetOpenClawStatus']();
 }
@@ -128,6 +152,10 @@ export function GetOrderBook(arg1) {
 
 export function GetSessionMessages(arg1) {
   return window['go']['main']['App']['GetSessionMessages'](arg1);
+}
+
+export function GetStockMoves(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetStockMoves'](arg1, arg2, arg3);
 }
 
 export function GetStockRealTimeData(arg1) {

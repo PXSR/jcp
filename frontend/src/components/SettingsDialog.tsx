@@ -54,6 +54,7 @@ interface OpenClawConfig {
 }
 
 type TabType = 'provider' | 'intent' | 'strategy' | 'mcp' | 'memory' | 'chart' | 'proxy' | 'openclaw' | 'update';
+type AgentSelectionStyle = 'balanced' | 'conservative' | 'aggressive';
 
 interface SettingsDialogProps {
   isOpen: boolean;
@@ -113,6 +114,10 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onClose 
   const [activeStrategyId, setActiveStrategyId] = useState<string>('');
   const [moderatorAiId, setModeratorAiId] = useState<string>('');
   const [strategyAiId, setStrategyAiId] = useState<string>('');
+  const [aiRetryCount, setAiRetryCount] = useState<number>(2);
+  const [verboseAgentIO, setVerboseAgentIO] = useState<boolean>(false);
+  const [agentSelectionStyle, setAgentSelectionStyle] = useState<AgentSelectionStyle>('balanced');
+  const [enableSecondReview, setEnableSecondReview] = useState<boolean>(false);
 
   // Toast 通知
   const { toast, showToast, hideToast } = useSettingsToast();
@@ -141,6 +146,14 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onClose 
         port: config.openClaw.port || 8080,
         apiKey: config.openClaw.apiKey || '',
       });
+    }
+    if (typeof (config as any).aiRetryCount === 'number') setAiRetryCount((config as any).aiRetryCount);
+    if (typeof (config as any).verboseAgentIO === 'boolean') setVerboseAgentIO((config as any).verboseAgentIO);
+    if (typeof (config as any).agentSelectionStyle === 'string') {
+      setAgentSelectionStyle((config as any).agentSelectionStyle as AgentSelectionStyle);
+    }
+    if (typeof (config as any).enableSecondReview === 'boolean') {
+      setEnableSecondReview((config as any).enableSecondReview);
     }
     if (config.moderatorAiId) setModeratorAiId(config.moderatorAiId);
     if (config.strategyAiId) setStrategyAiId(config.strategyAiId);
@@ -174,6 +187,10 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onClose 
     proxy: ProxyConfig;
     moderatorAiId: string;
     strategyAiId: string;
+    aiRetryCount: number;
+    verboseAgentIO: boolean;
+    agentSelectionStyle: AgentSelectionStyle;
+    enableSecondReview: boolean;
     indicators: any;
   }>>({});
 
@@ -208,6 +225,10 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onClose 
     openClaw: OpenClawConfig;
     moderatorAiId: string;
     strategyAiId: string;
+    aiRetryCount: number;
+    verboseAgentIO: boolean;
+    agentSelectionStyle: AgentSelectionStyle;
+    enableSecondReview: boolean;
     candleColorMode: string;
     indicators: any;
   }>) => {
@@ -285,15 +306,35 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({ isOpen, onClose 
                 strategyAiId={strategyAiId}
                 strategies={strategies}
                 memoryAiId={memoryConfig.aiConfigId}
+                aiRetryCount={aiRetryCount}
+                verboseAgentIO={verboseAgentIO}
+                onRetryCountChange={(count) => {
+                  setAiRetryCount(count);
+                  saveConfig({ aiRetryCount: count });
+                }}
+                onVerboseAgentIOChange={(enabled) => {
+                  setVerboseAgentIO(enabled);
+                  saveConfig({ verboseAgentIO: enabled });
+                }}
               />
             )}
             {activeTab === 'intent' && (
               <IntentSettings
                 configs={aiConfigs}
                 moderatorAiId={moderatorAiId}
+                agentSelectionStyle={agentSelectionStyle}
+                enableSecondReview={enableSecondReview}
                 onModeratorAiIdChange={(id) => {
                   setModeratorAiId(id);
                   saveConfig({ moderatorAiId: id });
+                }}
+                onAgentSelectionStyleChange={(style) => {
+                  setAgentSelectionStyle(style);
+                  saveConfig({ agentSelectionStyle: style });
+                }}
+                onEnableSecondReviewChange={(enabled) => {
+                  setEnableSecondReview(enabled);
+                  saveConfig({ enableSecondReview: enabled });
                 }}
               />
             )}
@@ -425,12 +466,27 @@ interface ProviderSettingsProps {
   strategyAiId: string;
   strategies: Strategy[];
   memoryAiId: string;
+  aiRetryCount: number;
+  verboseAgentIO: boolean;
+  onRetryCountChange: (count: number) => void;
+  onVerboseAgentIOChange: (enabled: boolean) => void;
 }
 
 // 视图类型
 type ProviderView = 'list' | 'edit';
 
-const ProviderSettings: React.FC<ProviderSettingsProps> = ({ configs, onChange, moderatorAiId, strategyAiId, strategies, memoryAiId }) => {
+const ProviderSettings: React.FC<ProviderSettingsProps> = ({
+  configs,
+  onChange,
+  moderatorAiId,
+  strategyAiId,
+  strategies,
+  memoryAiId,
+  aiRetryCount,
+  verboseAgentIO,
+  onRetryCountChange,
+  onVerboseAgentIOChange,
+}) => {
   const [view, setView] = useState<ProviderView>('list');
   const [selectedConfig, setSelectedConfig] = useState<AIConfig | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -544,6 +600,10 @@ const ProviderSettings: React.FC<ProviderSettingsProps> = ({ configs, onChange, 
       onConfirmAdd={handleAddConfig}
       onCancelAdd={() => setShowAddModal(false)}
       getDeleteDisabledReason={getDeleteDisabledReason}
+      aiRetryCount={aiRetryCount}
+      verboseAgentIO={verboseAgentIO}
+      onRetryCountChange={onRetryCountChange}
+      onVerboseAgentIOChange={onVerboseAgentIOChange}
     />
   );
 };
@@ -562,11 +622,16 @@ interface ProviderListViewProps {
   onConfirmAdd: () => void;
   onCancelAdd: () => void;
   getDeleteDisabledReason: (id: string) => string | undefined;
+  aiRetryCount: number;
+  verboseAgentIO: boolean;
+  onRetryCountChange: (count: number) => void;
+  onVerboseAgentIOChange: (enabled: boolean) => void;
 }
 
 const ProviderListView: React.FC<ProviderListViewProps> = ({
   configs, onSelect, onSetDefault, onDelete, onCopy, onAdd,
-  showAddModal, newProviderType, onSelectType, onConfirmAdd, onCancelAdd, getDeleteDisabledReason
+  showAddModal, newProviderType, onSelectType, onConfirmAdd, onCancelAdd, getDeleteDisabledReason,
+  aiRetryCount, verboseAgentIO, onRetryCountChange, onVerboseAgentIOChange
 }) => {
   const { colors } = useTheme();
   const defaultCount = configs.filter(c => c.isDefault).length;
@@ -588,6 +653,34 @@ const ProviderListView: React.FC<ProviderListViewProps> = ({
           <Plus className="h-3.5 w-3.5" />
           添加
         </button>
+      </div>
+
+      <div className="fin-panel border fin-divider rounded-lg p-3 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className={`text-sm font-medium ${colors.isDark ? 'text-white' : 'text-slate-800'}`}>AI 请求重试</div>
+            <div className={`text-xs mt-1 ${colors.isDark ? 'text-slate-500' : 'text-slate-400'}`}>失败后自动重试次数（1-5）</div>
+          </div>
+          <select
+            value={aiRetryCount}
+            onChange={(e) => onRetryCountChange(Number(e.target.value))}
+            className={`fin-input rounded-lg px-2 py-1 text-sm ${colors.isDark ? 'text-white' : 'text-slate-800'}`}
+          >
+            {[1, 2, 3, 4, 5].map(count => (
+              <option key={count} value={count}>{count} 次</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="h-px fin-divider" />
+
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className={`text-sm font-medium ${colors.isDark ? 'text-white' : 'text-slate-800'}`}>完整 Agent 日志</div>
+            <div className={`text-xs mt-1 ${colors.isDark ? 'text-slate-500' : 'text-slate-400'}`}>输出工具调用和专家最终回复的详细日志</div>
+          </div>
+          <ToggleSwitch checked={verboseAgentIO} onChange={onVerboseAgentIOChange} />
+        </div>
       </div>
 
       {/* 配置列表 */}
@@ -943,10 +1036,22 @@ const ToggleSwitch: React.FC<{ checked: boolean; onChange: (v: boolean) => void 
 interface IntentSettingsProps {
   configs: AIConfig[];
   moderatorAiId: string;
+  agentSelectionStyle: AgentSelectionStyle;
+  enableSecondReview: boolean;
   onModeratorAiIdChange: (id: string) => void;
+  onAgentSelectionStyleChange: (style: AgentSelectionStyle) => void;
+  onEnableSecondReviewChange: (enabled: boolean) => void;
 }
 
-const IntentSettings: React.FC<IntentSettingsProps> = ({ configs, moderatorAiId, onModeratorAiIdChange }) => {
+const IntentSettings: React.FC<IntentSettingsProps> = ({
+  configs,
+  moderatorAiId,
+  agentSelectionStyle,
+  enableSecondReview,
+  onModeratorAiIdChange,
+  onAgentSelectionStyleChange,
+  onEnableSecondReviewChange,
+}) => {
   const { colors } = useTheme();
   const selectedConfig = configs.find(c => c.id === moderatorAiId);
   const defaultConfig = configs.find(c => c.isDefault);
@@ -986,6 +1091,32 @@ const IntentSettings: React.FC<IntentSettingsProps> = ({ configs, moderatorAiId,
               </option>
             ))}
           </select>
+        </div>
+
+        <div className="mt-4">
+          <label className={`block text-sm mb-2 ${colors.isDark ? 'text-slate-400' : 'text-slate-500'}`}>选人风格</label>
+          <select
+            value={agentSelectionStyle}
+            onChange={e => onAgentSelectionStyleChange(e.target.value as AgentSelectionStyle)}
+            className={`w-full fin-input rounded-lg px-3 py-2 text-sm ${colors.isDark ? 'text-white' : 'text-slate-800'}`}
+          >
+            <option value="balanced">平衡（默认）</option>
+            <option value="conservative">稳健优先</option>
+            <option value="aggressive">激进优先</option>
+          </select>
+          <div className={`text-xs mt-2 ${colors.isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+            {agentSelectionStyle === 'conservative' && '偏向风控/基本面，减少追涨型观点。'}
+            {agentSelectionStyle === 'balanced' && '综合短中线视角，默认推荐。'}
+            {agentSelectionStyle === 'aggressive' && '增加技术/资金/异动视角，适合短线交易场景。'}
+          </div>
+        </div>
+
+        <div className="mt-4 flex items-center justify-between gap-3">
+          <div>
+            <div className={`text-sm font-medium ${colors.isDark ? 'text-white' : 'text-slate-800'}`}>启用二轮复议</div>
+            <div className={`text-xs mt-1 ${colors.isDark ? 'text-slate-500' : 'text-slate-400'}`}>开启后会让已选专家根据首轮观点做一次简短复核</div>
+          </div>
+          <ToggleSwitch checked={enableSecondReview} onChange={onEnableSecondReviewChange} />
         </div>
 
         {/* 当前选择的配置信息 */}

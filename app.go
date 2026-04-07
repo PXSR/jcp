@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/run-bigpig/jcp/internal/adk"
 	"github.com/run-bigpig/jcp/internal/adk/mcp"
@@ -24,12 +28,20 @@ import (
 
 var log = logger.New("app")
 
+const defaultCoreContextCacheTTL = 30 * time.Second
+
+type coreContextCacheEntry struct {
+	context   string
+	timestamp time.Time
+}
+
 // App struct
 type App struct {
 	ctx               context.Context
 	configService     *services.ConfigService
 	marketService     *services.MarketService
 	newsService       *services.NewsService
+	f10Service        *services.F10Service
 	hotTrendService   *hottrend.HotTrendService
 	longHuBangService *services.LongHuBangService
 	marketPusher      *services.MarketDataPusher
@@ -46,6 +58,10 @@ type App struct {
 	// 会议取消管理
 	meetingCancels   map[string]context.CancelFunc
 	meetingCancelsMu sync.RWMutex
+
+	coreContextCacheTTL time.Duration
+	coreContextCache    map[string]coreContextCacheEntry
+	coreContextCacheMu  sync.RWMutex
 }
 
 // NewApp creates a new App application struct
@@ -67,6 +83,9 @@ func NewApp() *App {
 	// 初始化研报服务
 	researchReportService := services.NewResearchReportService()
 
+	// 初始化 F10 服务
+	f10Service := services.NewF10Service()
+
 	// 初始化舆情热点服务
 	hotTrendSvc, err := hottrend.NewHotTrendService()
 	if err != nil {
@@ -80,7 +99,7 @@ func NewApp() *App {
 	longHuBangService := services.NewLongHuBangService()
 
 	// 初始化工具注册中心
-	toolRegistry := tools.NewRegistry(marketService, newsService, configService, researchReportService, hotTrendSvc, longHuBangService)
+	toolRegistry := tools.NewRegistry(marketService, newsService, configService, researchReportService, f10Service, hotTrendSvc, longHuBangService)
 
 	// 初始化 MCP 管理器
 	mcpManager := mcp.NewManager()
@@ -124,7 +143,13 @@ func NewApp() *App {
 				break
 			}
 		}
+	} else {
+		meetingService.SetModeratorAIConfig(nil)
 	}
+	meetingService.SetRetryCount(configService.GetConfig().AIRetryCount)
+	meetingService.SetVerboseAgentIO(configService.GetConfig().VerboseAgentIO)
+	meetingService.SetAgentSelectionStyle(configService.GetConfig().AgentSelectionStyle)
+	meetingService.SetEnableSecondReview(configService.GetConfig().EnableSecondReview)
 
 	// 初始化Session服务
 	sessionService := services.NewSessionService(dataDir)
@@ -165,21 +190,24 @@ func NewApp() *App {
 	log.Info("所有服务初始化完成")
 
 	return &App{
-		configService:     configService,
-		marketService:     marketService,
-		newsService:       newsService,
-		hotTrendService:   hotTrendSvc,
-		longHuBangService: longHuBangService,
-		meetingService:    meetingService,
-		sessionService:    sessionService,
-		strategyService:   strategyService,
-		agentContainer:    agentContainer,
-		toolRegistry:      toolRegistry,
-		mcpManager:        mcpManager,
-		memoryManager:     memoryManager,
-		updateService:     updateService,
-		openClawServer:    openClawServer,
-		meetingCancels:    make(map[string]context.CancelFunc),
+		configService:       configService,
+		marketService:       marketService,
+		newsService:         newsService,
+		f10Service:          f10Service,
+		hotTrendService:     hotTrendSvc,
+		longHuBangService:   longHuBangService,
+		meetingService:      meetingService,
+		sessionService:      sessionService,
+		strategyService:     strategyService,
+		agentContainer:      agentContainer,
+		toolRegistry:        toolRegistry,
+		mcpManager:          mcpManager,
+		memoryManager:       memoryManager,
+		updateService:       updateService,
+		openClawServer:      openClawServer,
+		meetingCancels:      make(map[string]context.CancelFunc),
+		coreContextCacheTTL: defaultCoreContextCacheTTL,
+		coreContextCache:    make(map[string]coreContextCacheEntry),
 	}
 }
 
@@ -265,6 +293,8 @@ func (a *App) UpdateConfig(config *models.AppConfig) string {
 				break
 			}
 		}
+	} else if a.meetingService != nil {
+		a.meetingService.SetMemoryAIConfig(nil)
 	}
 	// 更新 Moderator AI 配置
 	if a.meetingService != nil && config.ModeratorAIID != "" {
@@ -274,6 +304,14 @@ func (a *App) UpdateConfig(config *models.AppConfig) string {
 				break
 			}
 		}
+	} else if a.meetingService != nil {
+		a.meetingService.SetModeratorAIConfig(nil)
+	}
+	if a.meetingService != nil {
+		a.meetingService.SetRetryCount(config.AIRetryCount)
+		a.meetingService.SetVerboseAgentIO(config.VerboseAgentIO)
+		a.meetingService.SetAgentSelectionStyle(config.AgentSelectionStyle)
+		a.meetingService.SetEnableSecondReview(config.EnableSecondReview)
 	}
 	// 更新 OpenClaw 服务配置（热更新）
 	a.applyOpenClawConfig(&config.OpenClaw)
@@ -413,6 +451,47 @@ func (a *App) GetOrderBook(code string) models.OrderBook {
 // SearchStocks 搜索股票
 func (a *App) SearchStocks(keyword string) []services.StockSearchResult {
 	return a.marketService.SearchStocks(keyword, 20)
+}
+
+// GetMarketStatus 获取市场状态
+func (a *App) GetMarketStatus() services.MarketStatus {
+	return a.marketService.GetMarketStatus()
+}
+
+// GetMarketIndices 获取大盘指数
+func (a *App) GetMarketIndices() []models.MarketIndex {
+	indices, _ := a.marketService.GetMarketIndices()
+	return indices
+}
+
+// GetF10Overview 获取 F10 综合数据
+func (a *App) GetF10Overview(code string) models.F10Overview {
+	if a.f10Service == nil {
+		return models.F10Overview{
+			Code:   code,
+			Errors: map[string]string{"service": "F10 服务未初始化"},
+		}
+	}
+	result, err := a.f10Service.GetOverview(code)
+	if err != nil {
+		return models.F10Overview{
+			Code:   code,
+			Errors: map[string]string{"request": err.Error()},
+		}
+	}
+	return result
+}
+
+// GetF10Valuation 获取估值快照
+func (a *App) GetF10Valuation(code string) models.StockValuation {
+	if a.f10Service == nil {
+		return models.StockValuation{}
+	}
+	valuation, err := a.f10Service.GetValuationByCode(code)
+	if err != nil {
+		log.Error("GetF10Valuation error: %v", err)
+	}
+	return valuation
 }
 
 // getDefaultAIConfig 获取默认AI配置
@@ -832,25 +911,27 @@ func (a *App) SendMeetingMessage(req MeetingMessageRequest) []models.ChatMessage
 
 	// 获取持仓信息
 	position := a.sessionService.GetPosition(req.StockCode)
+	coreContext := a.buildCoreContext(req.StockCode, stock, position)
 
 	// 判断是否为智能模式（无 @ 任何人）
 	if len(req.MentionIds) == 0 {
-		return a.runSmartMeeting(meetingCtx, req.StockCode, stock, req.Content, aiConfig, position)
+		return a.runSmartMeeting(meetingCtx, req.StockCode, stock, req.Content, coreContext, aiConfig, position)
 	}
 
 	// 原有逻辑：@ 指定专家
-	return a.runDirectMeeting(meetingCtx, req, stock, aiConfig, position)
+	return a.runDirectMeeting(meetingCtx, req, stock, coreContext, aiConfig, position)
 }
 
 // runSmartMeeting 智能会议模式
-func (a *App) runSmartMeeting(ctx context.Context, stockCode string, stock models.Stock, query string, aiConfig *models.AIConfig, position *models.StockPosition) []models.ChatMessage {
+func (a *App) runSmartMeeting(ctx context.Context, stockCode string, stock models.Stock, query string, coreContext string, aiConfig *models.AIConfig, position *models.StockPosition) []models.ChatMessage {
 	allAgents := a.strategyService.GetEnabledAgents()
 	chatReq := meeting.ChatRequest{
-		StockCode: stockCode,
-		Stock:     stock,
-		Query:     query,
-		AllAgents: allAgents,
-		Position:  position,
+		StockCode:   stockCode,
+		Stock:       stock,
+		Query:       query,
+		CoreContext: coreContext,
+		AllAgents:   allAgents,
+		Position:    position,
 	}
 
 	// 响应回调：每次发言完成后推送
@@ -898,7 +979,7 @@ func (a *App) runSmartMeeting(ctx context.Context, stockCode string, stock model
 }
 
 // runDirectMeeting 直接 @ 指定专家模式（带事件推送）
-func (a *App) runDirectMeeting(ctx context.Context, req MeetingMessageRequest, stock models.Stock, aiConfig *models.AIConfig, position *models.StockPosition) []models.ChatMessage {
+func (a *App) runDirectMeeting(ctx context.Context, req MeetingMessageRequest, stock models.Stock, coreContext string, aiConfig *models.AIConfig, position *models.StockPosition) []models.ChatMessage {
 	agentConfigs := a.strategyService.GetAgentsByIDs(req.MentionIds)
 	if len(agentConfigs) == 0 {
 		return []models.ChatMessage{}
@@ -909,6 +990,7 @@ func (a *App) runDirectMeeting(ctx context.Context, req MeetingMessageRequest, s
 		Agents:       agentConfigs,
 		Query:        req.Content,
 		ReplyContent: req.ReplyContent,
+		CoreContext:  coreContext,
 		Position:     position,
 	}
 
@@ -944,6 +1026,246 @@ func (a *App) convertSaveAndEmitResponses(stockCode string, responses []meeting.
 		messages = append(messages, msg)
 	}
 	return messages
+}
+
+func (a *App) buildCoreContext(stockCode string, stock models.Stock, position *models.StockPosition) string {
+	var sections []string
+
+	if section := buildCoreQuoteSection(stock); section != "" {
+		sections = append(sections, section)
+	}
+	if section := buildCorePositionSection(position, stock); section != "" {
+		sections = append(sections, section)
+	}
+	if a.marketService != nil {
+		if section := buildCoreMarketStatusSection(a.marketService.GetMarketStatus()); section != "" {
+			sections = append(sections, section)
+		}
+	}
+	if section := a.getOrBuildCoreRemoteContext(stockCode, func() (string, bool, error) {
+		return a.buildCoreRemoteContext(stockCode)
+	}); section != "" {
+		sections = append(sections, section)
+	}
+
+	return strings.TrimSpace(strings.Join(sections, "\n\n"))
+}
+
+func (a *App) buildCoreRemoteContext(stockCode string) (string, bool, error) {
+	if a.marketService == nil && a.f10Service == nil {
+		return "", false, nil
+	}
+
+	var sections []string
+	var errs []error
+	hasRemoteData := false
+
+	if a.marketService != nil {
+		if indices, err := a.marketService.GetMarketIndices(); err == nil {
+			if section := buildCoreIndicesSection(indices); section != "" {
+				sections = append(sections, section)
+				hasRemoteData = true
+			}
+		} else {
+			errs = append(errs, fmt.Errorf("indices: %w", err))
+		}
+		if announcements, err := a.marketService.GetStockAnnouncements(stockCode, 1, 3); err == nil {
+			if section := buildCoreAnnouncementsSection(announcements); section != "" {
+				sections = append(sections, section)
+				hasRemoteData = true
+			}
+		} else if strings.TrimSpace(stockCode) != "" {
+			errs = append(errs, fmt.Errorf("announcements: %w", err))
+		}
+	}
+	if a.f10Service != nil {
+		if valuation, err := a.f10Service.GetValuationByCode(stockCode); err == nil {
+			if section := buildCoreValuationSection(valuation); section != "" {
+				sections = append(sections, section)
+				hasRemoteData = true
+			}
+		} else if strings.TrimSpace(stockCode) != "" {
+			errs = append(errs, fmt.Errorf("valuation: %w", err))
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(sections, "\n\n")), hasRemoteData, errors.Join(errs...)
+}
+
+func (a *App) getOrBuildCoreRemoteContext(stockCode string, builder func() (string, bool, error)) string {
+	if strings.TrimSpace(stockCode) == "" {
+		contextText, _, _ := builder()
+		return contextText
+	}
+
+	if cached, ok := a.getCoreContextCache(stockCode); ok {
+		if time.Since(cached.timestamp) <= a.coreContextCacheTTL {
+			return cached.context
+		}
+	}
+
+	contextText, hasRemoteData, err := builder()
+	if strings.TrimSpace(contextText) != "" && (err == nil || hasRemoteData) {
+		a.setCoreContextCache(stockCode, contextText)
+		return contextText
+	}
+	if err != nil {
+		if cached, ok := a.getCoreContextCache(stockCode); ok && strings.TrimSpace(cached.context) != "" {
+			log.Warn("coreContext refresh failed for %s, use stale cache: %v", stockCode, err)
+			return cached.context
+		}
+		log.Warn("coreContext refresh failed for %s: %v", stockCode, err)
+	}
+	return contextText
+}
+
+func (a *App) getCoreContextCache(stockCode string) (coreContextCacheEntry, bool) {
+	a.coreContextCacheMu.RLock()
+	defer a.coreContextCacheMu.RUnlock()
+	entry, ok := a.coreContextCache[stockCode]
+	return entry, ok
+}
+
+func (a *App) setCoreContextCache(stockCode string, contextText string) {
+	a.coreContextCacheMu.Lock()
+	defer a.coreContextCacheMu.Unlock()
+	a.coreContextCache[stockCode] = coreContextCacheEntry{
+		context:   contextText,
+		timestamp: time.Now(),
+	}
+}
+
+func buildCoreQuoteSection(stock models.Stock) string {
+	if strings.TrimSpace(stock.Symbol) == "" && strings.TrimSpace(stock.Name) == "" {
+		return ""
+	}
+	lines := []string{
+		fmt.Sprintf("【标的快照】%s (%s)", stock.Name, stock.Symbol),
+		fmt.Sprintf("现价 %.2f，涨跌幅 %.2f%%，涨跌 %.2f", stock.Price, stock.ChangePercent, stock.Change),
+	}
+	rangeParts := make([]string, 0, 4)
+	if stock.Open > 0 {
+		rangeParts = append(rangeParts, fmt.Sprintf("开盘 %.2f", stock.Open))
+	}
+	if stock.High > 0 {
+		rangeParts = append(rangeParts, fmt.Sprintf("最高 %.2f", stock.High))
+	}
+	if stock.Low > 0 {
+		rangeParts = append(rangeParts, fmt.Sprintf("最低 %.2f", stock.Low))
+	}
+	if stock.PreClose > 0 {
+		rangeParts = append(rangeParts, fmt.Sprintf("昨收 %.2f", stock.PreClose))
+	}
+	if len(rangeParts) > 0 {
+		lines = append(lines, strings.Join(rangeParts, "，"))
+	}
+	if stock.Volume > 0 || stock.Amount > 0 {
+		lines = append(lines, fmt.Sprintf("成交量 %d，成交额 %.2f", stock.Volume, stock.Amount))
+	}
+	metaParts := make([]string, 0, 2)
+	if strings.TrimSpace(stock.Sector) != "" {
+		metaParts = append(metaParts, "板块 "+stock.Sector)
+	}
+	if strings.TrimSpace(stock.MarketCap) != "" {
+		metaParts = append(metaParts, "市值 "+stock.MarketCap)
+	}
+	if len(metaParts) > 0 {
+		lines = append(lines, strings.Join(metaParts, "，"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func buildCorePositionSection(position *models.StockPosition, stock models.Stock) string {
+	if position == nil || position.Shares <= 0 {
+		return ""
+	}
+	costAmount := float64(position.Shares) * position.CostPrice
+	marketValue := float64(position.Shares) * stock.Price
+	pnl := marketValue - costAmount
+	pnlRatio := 0.0
+	if costAmount > 0 {
+		pnlRatio = pnl / costAmount * 100
+	}
+	return fmt.Sprintf("【用户持仓】持有 %d 股，成本价 %.2f，按现价估算市值 %.2f，浮盈亏 %.2f（%.2f%%）", position.Shares, position.CostPrice, marketValue, pnl, pnlRatio)
+}
+
+func buildCoreMarketStatusSection(status services.MarketStatus) string {
+	return fmt.Sprintf("【市场状态】%s（status=%s，交易日=%t）", status.StatusText, status.Status, status.IsTradeDay)
+}
+
+func buildCoreIndicesSection(indices []models.MarketIndex) string {
+	if len(indices) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, minInt(len(indices), 3))
+	for _, idx := range indices {
+		if idx.Name == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %.2f (%.2f%%)", idx.Name, idx.Price, idx.ChangePercent))
+		if len(parts) >= 3 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "【大盘环境】" + strings.Join(parts, "；")
+}
+
+func buildCoreValuationSection(valuation models.StockValuation) string {
+	parts := make([]string, 0, 5)
+	if valuation.PETTM != 0 {
+		parts = append(parts, fmt.Sprintf("PE(TTM) %.2f", valuation.PETTM))
+	}
+	if valuation.PB != 0 {
+		parts = append(parts, fmt.Sprintf("PB %.2f", valuation.PB))
+	}
+	if valuation.TotalMarketCap != 0 {
+		parts = append(parts, fmt.Sprintf("总市值 %.2f亿", valuation.TotalMarketCap/1e8))
+	}
+	if valuation.FloatMarketCap != 0 {
+		parts = append(parts, fmt.Sprintf("流通市值 %.2f亿", valuation.FloatMarketCap/1e8))
+	}
+	if valuation.TurnoverRate != 0 {
+		parts = append(parts, fmt.Sprintf("换手率 %.2f%%", valuation.TurnoverRate))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "【估值摘要】" + strings.Join(parts, "，")
+}
+
+func buildCoreAnnouncementsSection(data models.StockAnnouncements) string {
+	if len(data.Items) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(data.Items))
+	for _, item := range data.Items {
+		if strings.TrimSpace(item.Title) == "" {
+			continue
+		}
+		title := item.Title
+		if len([]rune(title)) > 28 {
+			title = string([]rune(title)[:28]) + "..."
+		}
+		if item.NoticeDate != "" {
+			parts = append(parts, fmt.Sprintf("%s %s", item.NoticeDate, title))
+		} else {
+			parts = append(parts, title)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "【最新公告】" + strings.Join(parts, "；")
+}
+
+func minInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // RetryAgent 重试单个失败的专家（前端手动触发）
@@ -1333,6 +1655,45 @@ func (a *App) GetLongHuBangDetail(code, tradeDate string) []models.LongHuBangDet
 		return nil
 	}
 	return details
+}
+
+// GetBoardFundFlow 获取板块资金流
+func (a *App) GetBoardFundFlow(category string, page, pageSize int) models.BoardFundFlowList {
+	if a.marketService == nil {
+		return models.BoardFundFlowList{}
+	}
+	data, err := a.marketService.GetBoardFundFlowList(category, page, pageSize)
+	if err != nil {
+		log.Error("获取板块资金流失败: %v", err)
+		return models.BoardFundFlowList{Category: category}
+	}
+	return data
+}
+
+// GetStockMoves 获取盘口异动
+func (a *App) GetStockMoves(moveType string, page, pageSize int) models.StockMoveList {
+	if a.marketService == nil {
+		return models.StockMoveList{MoveType: moveType}
+	}
+	data, err := a.marketService.GetStockMovesList(moveType, page, pageSize)
+	if err != nil {
+		log.Error("获取盘口异动失败: %v", err)
+		return models.StockMoveList{MoveType: moveType}
+	}
+	return data
+}
+
+// GetBoardLeaders 获取板块龙头候选
+func (a *App) GetBoardLeaders(boardCode string, limit int) models.BoardLeaderList {
+	if a.marketService == nil {
+		return models.BoardLeaderList{BoardCode: boardCode}
+	}
+	data, err := a.marketService.GetBoardLeaders(boardCode, limit)
+	if err != nil {
+		log.Error("获取板块龙头失败: %v", err)
+		return models.BoardLeaderList{BoardCode: boardCode}
+	}
+	return data
 }
 
 // NotifyFrontendReady 前端通知已准备好，开始推送数据

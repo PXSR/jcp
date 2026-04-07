@@ -351,6 +351,83 @@
             linear-gradient(color-mix(in srgb, var(--accent) 8%, transparent) 1px, transparent 1px),
             linear-gradient(90deg, color-mix(in srgb, var(--accent) 6%, transparent) 1px, transparent 1px);
     }
+
+    .f10-panel table {
+        table-layout: auto;
+    }
+
+    .f10-panel th,
+    .f10-panel td {
+        word-break: break-word;
+    }
+
+    [data-theme-mode="light"] .f10-panel .text-slate-100,
+    [data-theme-mode="light"] .f10-panel .text-slate-200 {
+        color: var(--text-0);
+    }
+
+    [data-theme-mode="light"] .f10-panel .text-slate-300,
+    [data-theme-mode="light"] .f10-panel .text-slate-400 {
+        color: color-mix(in srgb, var(--text-0) 70%, var(--text-1));
+    }
+
+    [data-theme-mode="light"] .f10-panel .text-slate-500 {
+        color: var(--text-1);
+    }
+
+    [data-theme-mode="light"] .f10-panel .text-slate-600 {
+        color: color-mix(in srgb, var(--text-1) 78%, var(--text-2));
+    }
+
+    [data-theme-mode="light"] .f10-panel .border-slate-700\/60,
+    [data-theme-mode="light"] .f10-panel .border-slate-700\/50,
+    [data-theme-mode="light"] .f10-panel .border-slate-700\/40,
+    [data-theme-mode="light"] .f10-panel .border-slate-800\/70 {
+        border-color: color-mix(in srgb, var(--stroke) 88%, transparent);
+    }
+
+    [data-theme-mode="light"] .f10-panel .divide-slate-700\/50 > :not([hidden]) ~ :not([hidden]),
+    [data-theme-mode="light"] .f10-panel .divide-slate-800\/70 > :not([hidden]) ~ :not([hidden]) {
+        border-color: color-mix(in srgb, var(--stroke) 72%, transparent);
+    }
+
+    [data-theme-mode="light"] .f10-panel .bg-slate-900\/90 {
+        background: color-mix(in srgb, var(--panel-strong) 92%, white);
+    }
+
+    [data-theme-mode="light"] .f10-panel .text-red-300,
+    [data-theme-mode="light"] .f10-panel .text-red-400 {
+        color: #dc2626;
+    }
+
+    [data-theme-mode="light"] .f10-panel .text-green-300,
+    [data-theme-mode="light"] .f10-panel .text-green-400 {
+        color: #059669;
+    }
+
+    [data-theme-mode="light"] .f10-panel .text-amber-300 {
+        color: #b45309;
+    }
+
+    [data-theme-mode="light"] .f10-panel .border-amber-500\/40 {
+        border-color: rgba(245, 158, 11, 0.35);
+    }
+
+    [data-theme-mode="light"] .f10-panel .text-orange-200 {
+        color: #c2410c;
+    }
+
+    [data-theme-mode="light"] .f10-panel .text-orange-200\/80 {
+        color: #9a3412;
+    }
+
+    [data-theme-mode="light"] .f10-panel .border-orange-500\/30 {
+        border-color: rgba(249, 115, 22, 0.35);
+    }
+
+    [data-theme-mode="light"] .f10-panel .bg-orange-500\/10 {
+        background: rgba(249, 115, 22, 0.08);
+    }
 }
 
 /* 全局拖拽鼠标样式 */

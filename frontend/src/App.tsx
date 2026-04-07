@@ -2,11 +2,13 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { StockList } from './components/StockList';
 import { StockChartLW } from './components/StockChartLW';
 import { OrderBook as OrderBookComponent } from './components/OrderBook';
+import { F10Panel } from './components/F10Panel';
 import { AgentRoom } from './components/AgentRoom';
 import { SettingsDialog } from './components/SettingsDialog';
 import { PositionDialog } from './components/PositionDialog';
 import { HotTrendDialog } from './components/HotTrendDialog';
 import { LongHuBangDialog } from './components/LongHuBangDialog';
+import { MarketMovesDialog } from './components/MarketMovesDialog';
 import { WelcomePage } from './components/WelcomePage';
 import { ThemeSwitcher } from './components/ThemeSwitcher';
 import { useTheme } from './contexts/ThemeContext';
@@ -14,12 +16,13 @@ import { useCandleColor } from './contexts/CandleColorContext';
 import { ResizeHandle } from './components/ResizeHandle';
 import { getWatchlist, addToWatchlist, removeFromWatchlist } from './services/watchlistService';
 import { getKLineData, getOrderBook } from './services/stockService';
+import { getF10Overview } from './services/f10Service';
 import { getOrCreateSession, StockSession, updateStockPosition } from './services/sessionService';
 import { getConfig, updateConfig } from './services/configService';
 import { useMarketEvents } from './hooks/useMarketEvents';
 import { useMarketStatus } from './hooks/useMarketStatus';
-import { Stock, KLineData, OrderBook, TimePeriod, Telegraph, MarketIndex } from './types';
-import { Radio, Settings, List, Minus, Square, X, Copy, Briefcase, TrendingUp, BarChart3 } from 'lucide-react';
+import { Stock, KLineData, OrderBook, TimePeriod, Telegraph, MarketIndex, F10Overview } from './types';
+import { Radio, Settings, List, Minus, Square, X, Copy, Briefcase, TrendingUp, BarChart3, Activity } from 'lucide-react';
 import logo from './assets/images/logo.png';
 import { GetTelegraphList, OpenURL, WindowMinimize, WindowMaximize, WindowClose } from '../wailsjs/go/main/App';
 import { WindowIsMaximised, WindowSetSize, WindowGetSize } from '../wailsjs/runtime/runtime';
@@ -62,8 +65,13 @@ const App: React.FC = () => {
   const [showPosition, setShowPosition] = useState(false);
   const [showHotTrend, setShowHotTrend] = useState(false);
   const [showLongHuBang, setShowLongHuBang] = useState(false);
+  const [showMarketMoves, setShowMarketMoves] = useState(false);
+  const [showF10, setShowF10] = useState(false);
   const [marketIndices, setMarketIndices] = useState<MarketIndex[]>([]);
   const [isMaximized, setIsMaximized] = useState(false);
+  const [f10Overview, setF10Overview] = useState<F10Overview | null>(null);
+  const [f10Loading, setF10Loading] = useState(false);
+  const [f10Error, setF10Error] = useState('');
   const klineRequestIdRef = useRef(0);
 
   // 使用纯前端市场状态判断
@@ -256,6 +264,29 @@ const App: React.FC = () => {
     setShowTelegraphList(false);
   };
 
+  const fetchSelectedF10 = useCallback(async (symbol: string) => {
+    if (!symbol) return;
+    setF10Loading(true);
+    setF10Error('');
+    try {
+      const overview = await getF10Overview(symbol);
+      setF10Overview(overview);
+    } catch (err) {
+      console.error('Failed to load F10 overview:', err);
+      setF10Error(err instanceof Error ? err.message : '获取F10数据失败');
+    } finally {
+      setF10Loading(false);
+    }
+  }, []);
+
+  const handleShowTrend = useCallback(() => {
+    setShowF10(false);
+  }, []);
+
+  const handleShowF10 = useCallback(() => {
+    setShowF10(true);
+  }, []);
+
   // 使用市场事件 Hook
   const { subscribeOrderBook, subscribeKLine } = useMarketEvents({
     onStockUpdate: handleStockUpdate,
@@ -395,6 +426,17 @@ const App: React.FC = () => {
     void loadKLineData();
   }, [selectedSymbol, timePeriod, subscribeKLine]);
 
+  useEffect(() => {
+    setShowF10(false);
+    setF10Overview(null);
+    setF10Error('');
+  }, [selectedSymbol]);
+
+  useEffect(() => {
+    if (!showF10 || !selectedSymbol) return;
+    void fetchSelectedF10(selectedSymbol);
+  }, [showF10, selectedSymbol, fetchSelectedF10]);
+
   // 初始化窗口最大化状态
   useEffect(() => {
     void syncWindowMaximizedState();
@@ -485,6 +527,13 @@ const App: React.FC = () => {
             title="全网热点"
           >
             <TrendingUp className="h-4 w-4" />
+          </button>
+          <button
+            onClick={() => setShowMarketMoves(true)}
+            className={`p-2 rounded-lg fin-panel border fin-divider transition-colors ${colors.isDark ? 'text-slate-300 hover:text-white' : 'text-slate-600 hover:text-slate-900'} hover:border-cyan-400/40`}
+            title="异动中心"
+          >
+            <Activity className="h-4 w-4" />
           </button>
           <ThemeSwitcher />
           <button
@@ -611,27 +660,65 @@ const App: React.FC = () => {
             <AStockStatItem label="振幅" value={selectedStock.preClose > 0 ? ((selectedStock.high - selectedStock.low) / selectedStock.preClose * 100).toFixed(2) + '%' : '--'} isPlain isDark={colors.isDark} />
           </div>
 
+          <div className="px-4 py-1 border-b fin-divider-soft shrink-0">
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={handleShowTrend}
+                className={`text-xs px-2.5 py-0.5 rounded border transition-colors ${
+                  !showF10
+                    ? 'border-accent text-accent-2 bg-accent/10'
+                    : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+                }`}
+              >
+                趋势图
+              </button>
+              <button
+                type="button"
+                onClick={handleShowF10}
+                className={`text-xs px-2.5 py-0.5 rounded border transition-colors ${
+                  showF10
+                    ? 'border-accent text-accent-2 bg-accent/10'
+                    : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+                }`}
+              >
+                F10 全景
+              </button>
+            </div>
+          </div>
+
           <div className="flex-1 flex flex-col min-h-0">
-             {/* Chart Section */}
-            <div className="flex-1 p-1 relative min-h-0">
-               <StockChartLW
-                  data={kLineData}
-                  updateMode={kLineUpdateMode}
-                  period={timePeriod}
-                  onPeriodChange={setTimePeriod}
-                  stock={selectedStock}
-               />
-            </div>
+            {!showF10 ? (
+              <>
+                <div className="flex-1 p-1 relative min-h-0">
+                  <StockChartLW
+                    data={kLineData}
+                    updateMode={kLineUpdateMode}
+                    period={timePeriod}
+                    onPeriodChange={setTimePeriod}
+                    stock={selectedStock}
+                  />
+                </div>
 
-            {/* Bottom Resize Handle */}
-            <ResizeHandle direction="vertical" onResize={handleBottomResize} onResizeEnd={handleResizeEnd} />
+                <ResizeHandle direction="vertical" onResize={handleBottomResize} onResizeEnd={handleResizeEnd} />
 
-            {/* Bottom Info Panel: Order Book Only */}
-            <div style={{ height: bottomPanelHeight }} className="border-t fin-divider-soft flex shrink-0">
-               <div className="flex-1 overflow-hidden relative">
-                  <OrderBookComponent data={orderBook} />
-               </div>
-            </div>
+                <div style={{ height: bottomPanelHeight }} className="border-t fin-divider-soft flex shrink-0">
+                  <div className="flex-1 overflow-hidden relative">
+                    <OrderBookComponent data={orderBook} />
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="flex-1 min-h-0 border-t fin-divider-soft overflow-hidden">
+                <F10Panel
+                  overview={f10Overview}
+                  loading={f10Loading}
+                  error={f10Error}
+                  onRefresh={() => void fetchSelectedF10(selectedStock.symbol)}
+                  onCollapse={() => setShowF10(false)}
+                />
+              </div>
+            )}
           </div>
         </div>
 
@@ -665,6 +752,7 @@ const App: React.FC = () => {
       />
       <HotTrendDialog isOpen={showHotTrend} onClose={() => setShowHotTrend(false)} />
       <LongHuBangDialog isOpen={showLongHuBang} onClose={() => setShowLongHuBang(false)} />
+      <MarketMovesDialog isOpen={showMarketMoves} onClose={() => setShowMarketMoves(false)} />
     </div>
   );
 };

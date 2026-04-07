@@ -43,9 +43,17 @@ export function GetAllHotTrends():Promise<Array<hottrend.HotTrendResult>>;
 
 export function GetAvailableTools():Promise<Array<tools.ToolInfo>>;
 
+export function GetBoardFundFlow(arg1:string,arg2:number,arg3:number):Promise<models.BoardFundFlowList>;
+
+export function GetBoardLeaders(arg1:string,arg2:number):Promise<models.BoardLeaderList>;
+
 export function GetConfig():Promise<models.AppConfig>;
 
 export function GetCurrentVersion():Promise<string>;
+
+export function GetF10Overview(arg1:string):Promise<models.F10Overview>;
+
+export function GetF10Valuation(arg1:string):Promise<models.StockValuation>;
 
 export function GetHotTrend(arg1:string):Promise<hottrend.HotTrendResult>;
 
@@ -63,6 +71,10 @@ export function GetMCPServers():Promise<Array<models.MCPServerConfig>>;
 
 export function GetMCPStatus():Promise<Array<mcp.ServerStatus>>;
 
+export function GetMarketIndices():Promise<Array<models.MarketIndex>>;
+
+export function GetMarketStatus():Promise<services.MarketStatus>;
+
 export function GetOpenClawStatus():Promise<Record<string, any>>;
 
 export function GetOrCreateSession(arg1:string,arg2:string):Promise<models.StockSession>;
@@ -70,6 +82,8 @@ export function GetOrCreateSession(arg1:string,arg2:string):Promise<models.Stock
 export function GetOrderBook(arg1:string):Promise<models.OrderBook>;
 
 export function GetSessionMessages(arg1:string):Promise<Array<models.ChatMessage>>;
+
+export function GetStockMoves(arg1:string,arg2:number,arg3:number):Promise<models.StockMoveList>;
 
 export function GetStockRealTimeData(arg1:Array<string>):Promise<Array<models.Stock>>;
 

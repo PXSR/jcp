@@ -36,9 +36,10 @@ const (
 
 // 重试配置常量
 const (
-	MaxAgentRetries = 2                // 单个专家最大重试次数
-	RetryBaseDelay  = 2 * time.Second  // 指数退避基础延迟
-	RetryMaxDelay   = 15 * time.Second // 指数退避最大延迟
+	DefaultAIRetryCount = 2
+	MaxAgentRetries     = 2                // 单个专家最大重试次数
+	RetryBaseDelay      = 2 * time.Second  // 指数退避基础延迟
+	RetryMaxDelay       = 15 * time.Second // 指数退避最大延迟
 )
 
 // 错误定义
@@ -131,9 +132,13 @@ type Service struct {
 	toolRegistry      *tools.Registry
 	mcpManager        *mcp.Manager
 	memoryManager     *memory.Manager
-	memoryAIConfig    *models.AIConfig         // 记忆管理使用的 LLM 配置
-	moderatorAIConfig *models.AIConfig         // 意图分析(小韭菜)使用的 LLM 配置
-	aiConfigResolver  AIConfigResolver         // AI配置解析器
+	memoryAIConfig    *models.AIConfig // 记忆管理使用的 LLM 配置
+	moderatorAIConfig *models.AIConfig // 意图分析(小韭菜)使用的 LLM 配置
+	aiConfigResolver  AIConfigResolver // AI配置解析器
+	retryCount        int
+	verboseAgentIO    bool
+	selectionStyle    models.AgentSelectionStyle
+	enableSecondRound bool
 	meetingStates     map[string]*MeetingState // 中断的会议状态缓存，key: stockCode
 	meetingStatesMu   sync.RWMutex
 }
@@ -141,10 +146,14 @@ type Service struct {
 // NewServiceFull 创建完整配置的会议室服务
 func NewServiceFull(registry *tools.Registry, mcpMgr *mcp.Manager) *Service {
 	return &Service{
-		modelFactory:  adk.NewModelFactory(),
-		toolRegistry:  registry,
-		mcpManager:    mcpMgr,
-		meetingStates: make(map[string]*MeetingState),
+		modelFactory:      adk.NewModelFactory(),
+		toolRegistry:      registry,
+		mcpManager:        mcpMgr,
+		retryCount:        DefaultAIRetryCount,
+		verboseAgentIO:    false,
+		selectionStyle:    models.AgentSelectionBalanced,
+		enableSecondRound: false,
+		meetingStates:     make(map[string]*MeetingState),
 	}
 }
 
@@ -168,6 +177,37 @@ func (s *Service) SetAIConfigResolver(resolver AIConfigResolver) {
 	s.aiConfigResolver = resolver
 }
 
+// SetRetryCount 设置 AI 请求重试次数（1-5，超出范围自动收敛）
+func (s *Service) SetRetryCount(count int) {
+	if count < 1 {
+		count = DefaultAIRetryCount
+	}
+	if count > 5 {
+		count = 5
+	}
+	s.retryCount = count
+}
+
+// SetVerboseAgentIO 设置是否输出完整 Agent 输入输出日志
+func (s *Service) SetVerboseAgentIO(enabled bool) {
+	s.verboseAgentIO = enabled
+}
+
+// SetAgentSelectionStyle 设置小韭菜选人风格
+func (s *Service) SetAgentSelectionStyle(style models.AgentSelectionStyle) {
+	switch style {
+	case models.AgentSelectionConservative, models.AgentSelectionAggressive, models.AgentSelectionBalanced:
+		s.selectionStyle = style
+	default:
+		s.selectionStyle = models.AgentSelectionBalanced
+	}
+}
+
+// SetEnableSecondReview 设置是否启用二轮复议
+func (s *Service) SetEnableSecondReview(enabled bool) {
+	s.enableSecondRound = enabled
+}
+
 // ChatRequest 聊天请求
 type ChatRequest struct {
 	StockCode    string                `json:"stockCode"` // 股票代码（用于状态缓存 key）
@@ -176,6 +216,7 @@ type ChatRequest struct {
 	Agents       []models.AgentConfig  `json:"agents"`
 	Query        string                `json:"query"`
 	ReplyContent string                `json:"replyContent"`
+	CoreContext  string                `json:"coreContext"`
 	AllAgents    []models.AgentConfig  `json:"allAgents"` // 所有可用专家（智能模式用）
 	Position     *models.StockPosition `json:"position"`  // 用户持仓信息
 }
@@ -273,6 +314,7 @@ func (s *Service) RunSmartMeetingSync(ctx context.Context, aiConfig *models.AICo
 		moderatorLLM = llm
 	}
 	moderator := NewModerator(moderatorLLM)
+	moderator.SetSelectionStyle(s.selectionStyle)
 
 	// 设置记忆 LLM
 	if s.memoryManager != nil {
@@ -313,7 +355,10 @@ func (s *Service) RunSmartMeetingSync(ctx context.Context, aiConfig *models.AICo
 
 	selectedAgents := s.filterAgentsOrdered(req.AllAgents, decision.Selected)
 	if len(selectedAgents) == 0 {
-		return "", fmt.Errorf("小韭菜未选中任何有效专家")
+		selectedAgents = s.fallbackAgents(req.AllAgents, 2)
+		if len(selectedAgents) == 0 {
+			return "", fmt.Errorf("小韭菜未选中任何有效专家")
+		}
 	}
 
 	// 第1轮：专家串行发言，失败时跳过继续
@@ -346,10 +391,10 @@ func (s *Service) RunSmartMeetingSync(ctx context.Context, aiConfig *models.AICo
 			}
 		}
 
-		content, err := retryRun(meetingCtx, MaxAgentRetries, func() (string, error) {
+		content, err := retryRun(meetingCtx, s.retryCount, func() (string, error) {
 			agentCtx, agentCancel := context.WithTimeout(meetingCtx, AgentTimeout)
 			defer agentCancel()
-			return s.runSingleAgent(agentCtx, builder, &agentCfg, &req.Stock, agentQuery, previousContext, nil, req.Position)
+			return s.runSingleAgent(agentCtx, builder, &agentCfg, &req.Stock, agentQuery, previousContext, req.CoreContext, nil, req.Position)
 		})
 
 		if err != nil {
@@ -368,9 +413,18 @@ func (s *Service) RunSmartMeetingSync(ctx context.Context, aiConfig *models.AICo
 		return "", fmt.Errorf("所有专家均分析失败")
 	}
 
+	if s.enableSecondRound {
+		reviewResponses := s.runSecondReviewRound(meetingCtx, aiConfig, &req.Stock, req.Query, selectedAgents, history, req.Position, nil, MeetingModeSmart)
+		for _, resp := range reviewResponses {
+			history = append(history, DiscussionEntry{
+				Round: 2, AgentID: resp.AgentID, AgentName: resp.AgentName, Role: resp.Role, Content: resp.Content,
+			})
+		}
+	}
+
 	// 最终轮：小韭菜总结
 	summaryCtx, summaryCancel := context.WithTimeout(meetingCtx, ModeratorTimeout)
-	summary, err := moderator.Summarize(summaryCtx, &req.Stock, req.Query, history)
+	summary, err := moderator.SummarizeWithContext(summaryCtx, &req.Stock, req.Query, history, buildSummaryContext(req.CoreContext, &req.Stock, req.Position))
 	summaryCancel()
 	if err != nil {
 		return "", fmt.Errorf("总结生成失败: %w", err)
@@ -430,6 +484,7 @@ func (s *Service) RunSmartMeetingWithCallback(ctx context.Context, aiConfig *mod
 		moderatorLLM = llm
 	}
 	moderator := NewModerator(moderatorLLM)
+	moderator.SetSelectionStyle(s.selectionStyle)
 
 	// 设置 LLM 到记忆管理器（启用摘要功能）
 	if s.memoryManager != nil {
@@ -504,7 +559,10 @@ func (s *Service) RunSmartMeetingWithCallback(ctx context.Context, aiConfig *mod
 	// 筛选被选中的专家（按小韭菜选择的顺序）
 	selectedAgents := s.filterAgentsOrdered(req.AllAgents, decision.Selected)
 	if len(selectedAgents) == 0 {
-		return responses, nil
+		selectedAgents = s.fallbackAgents(req.AllAgents, 2)
+		if len(selectedAgents) == 0 {
+			return responses, nil
+		}
 	}
 
 	// 第1轮：专家串行发言，后一个参考前面的内容
@@ -553,10 +611,10 @@ func (s *Service) RunSmartMeetingWithCallback(ctx context.Context, aiConfig *mod
 		}
 
 		// 运行单个专家（带超时控制 + 指数退避重试）
-		content, err := retryRun(meetingCtx, MaxAgentRetries, func() (string, error) {
+		content, err := retryRun(meetingCtx, s.retryCount, func() (string, error) {
 			agentCtx, agentCancel := context.WithTimeout(meetingCtx, AgentTimeout)
 			defer agentCancel()
-			return s.runSingleAgent(agentCtx, builder, &agentCfg, &req.Stock, agentQuery, previousContext, progressCallback, req.Position)
+			return s.runSingleAgent(agentCtx, builder, &agentCfg, &req.Stock, agentQuery, previousContext, req.CoreContext, progressCallback, req.Position)
 		})
 
 		if err != nil {
@@ -661,6 +719,19 @@ func (s *Service) RunSmartMeetingWithCallback(ctx context.Context, aiConfig *mod
 		}
 	}
 
+	if s.enableSecondRound && len(history) > 0 {
+		reviewResponses := s.runSecondReviewRound(meetingCtx, aiConfig, &req.Stock, req.Query, selectedAgents, history, req.Position, progressCallback, MeetingModeSmart)
+		for _, resp := range reviewResponses {
+			responses = append(responses, resp)
+			if respCallback != nil {
+				respCallback(resp)
+			}
+			history = append(history, DiscussionEntry{
+				Round: 2, AgentID: resp.AgentID, AgentName: resp.AgentName, Role: resp.Role, Content: resp.Content,
+			})
+		}
+	}
+
 	// 最终轮：小韭菜总结（带超时）
 	emitProgress(progressCallback, ProgressEvent{
 		Type: "agent_start", AgentID: "moderator", AgentName: "小韭菜", Detail: "总结讨论",
@@ -690,7 +761,7 @@ func (s *Service) RunSmartMeetingWithCallback(ctx context.Context, aiConfig *mod
 			AgentName:   "小韭菜",
 			Role:        "会议主持",
 			Content:     summary,
-			Round:       2,
+			Round:       summaryRound(history),
 			MsgType:     "summary",
 			MeetingMode: MeetingModeSmart,
 		}
@@ -755,10 +826,10 @@ func (s *Service) runAgentsParallel(ctx context.Context, defaultLLM model.LLM, d
 			builder := s.createBuilder(agentLLM, agentAIConfig)
 
 			// 单个 Agent 带指数退避重试
-			content, err := retryRun(parallelCtx, MaxAgentRetries, func() (string, error) {
+			content, err := retryRun(parallelCtx, s.retryCount, func() (string, error) {
 				agentCtx, agentCancel := context.WithTimeout(parallelCtx, AgentTimeout)
 				defer agentCancel()
-				return s.runSingleAgent(agentCtx, builder, &cfg, &req.Stock, req.Query, req.ReplyContent, nil, req.Position)
+				return s.runSingleAgent(agentCtx, builder, &cfg, &req.Stock, req.Query, req.ReplyContent, req.CoreContext, nil, req.Position)
 			})
 			if err != nil {
 				log.Error("agent %s failed after retries: %v", cfg.ID, err)
@@ -802,10 +873,11 @@ func (s *Service) runSingleAgent(
 	stock *models.Stock,
 	query string,
 	replyContent string,
+	coreContext string,
 	progressCallback ProgressCallback,
 	position *models.StockPosition,
 ) (string, error) {
-	agentInstance, err := builder.BuildAgentWithContext(cfg, stock, query, replyContent, position)
+	agentInstance, err := builder.BuildAgentWithContext(cfg, stock, query, replyContent, coreContext, position)
 	if err != nil {
 		return "", err
 	}
@@ -858,11 +930,17 @@ func (s *Service) runSingleAgent(
 					Detail: part.FunctionCall.Name,
 				})
 			}
+			if part.FunctionCall != nil && s.verboseAgentIO {
+				log.Info("agent %s tool_call: %s", cfg.ID, part.FunctionCall.Name)
+			}
 			if part.FunctionResponse != nil && progressCallback != nil {
 				progressCallback(ProgressEvent{
 					Type: "tool_result", AgentID: cfg.ID, AgentName: cfg.Name,
 					Detail: part.FunctionResponse.Name,
 				})
+			}
+			if part.FunctionResponse != nil && s.verboseAgentIO {
+				log.Info("agent %s tool_result: %s", cfg.ID, part.FunctionResponse.Name)
 			}
 			if part.Text != "" {
 				// streaming 模式下只累积 Partial 片段，避免重复
@@ -881,7 +959,11 @@ func (s *Service) runSingleAgent(
 		}
 	}
 
-	return openai.FilterVendorToolCallMarkers(sb.String()), nil
+	content := openai.FilterVendorToolCallMarkers(sb.String())
+	if s.verboseAgentIO && strings.TrimSpace(content) != "" {
+		log.Info("agent %s output: %s", cfg.ID, truncateString(content, 160))
+	}
+	return content, nil
 }
 
 // filterAgentsOrdered 按指定顺序筛选专家（保持小韭菜选择的顺序）
@@ -991,10 +1073,10 @@ func (s *Service) RetrySingleAgent(
 	})
 
 	// 带指数退避重试
-	content, err := retryRun(ctx, MaxAgentRetries, func() (string, error) {
+	content, err := retryRun(ctx, s.retryCount, func() (string, error) {
 		agentCtx, cancel := context.WithTimeout(ctx, AgentTimeout)
 		defer cancel()
-		return s.runSingleAgent(agentCtx, builder, agentCfg, stock, query, "", progressCallback, position)
+		return s.runSingleAgent(agentCtx, builder, agentCfg, stock, query, "", "", progressCallback, position)
 	})
 
 	emitProgress(progressCallback, ProgressEvent{
@@ -1115,10 +1197,10 @@ func (s *Service) ContinueMeeting(
 			previousContext = state.MemoryContext + "\n" + previousContext
 		}
 
-		content, err := retryRun(meetingCtx, MaxAgentRetries, func() (string, error) {
+		content, err := retryRun(meetingCtx, s.retryCount, func() (string, error) {
 			agentCtx, agentCancel := context.WithTimeout(meetingCtx, AgentTimeout)
 			defer agentCancel()
-			return s.runSingleAgent(agentCtx, builder, &agentCfg, &state.Stock, state.Query, previousContext, progressCallback, state.Position)
+			return s.runSingleAgent(agentCtx, builder, &agentCfg, &state.Stock, state.Query, previousContext, "", progressCallback, state.Position)
 		})
 
 		if err != nil {
@@ -1205,7 +1287,7 @@ func (s *Service) runMeetingSummary(
 	})
 
 	summaryCtx, summaryCancel := context.WithTimeout(ctx, ModeratorTimeout)
-	summary, err := state.Moderator.Summarize(summaryCtx, &state.Stock, state.Query, history)
+	summary, err := state.Moderator.SummarizeWithContext(summaryCtx, &state.Stock, state.Query, history, buildSummaryContext("", &state.Stock, state.Position))
 	summaryCancel()
 
 	emitProgress(progressCallback, ProgressEvent{
@@ -1225,7 +1307,7 @@ func (s *Service) runMeetingSummary(
 		summaryResp := ChatResponse{
 			AgentID: "moderator", AgentName: "小韭菜",
 			Role: "会议主持", Content: summary,
-			Round: 2, MsgType: "summary", MeetingMode: MeetingModeSmart,
+			Round: summaryRound(history), MsgType: "summary", MeetingMode: MeetingModeSmart,
 		}
 		responses = append(responses, summaryResp)
 		if respCallback != nil {
@@ -1245,4 +1327,133 @@ func (s *Service) runMeetingSummary(
 	}
 
 	return responses, nil
+}
+
+func buildSummaryContext(coreContext string, stock *models.Stock, position *models.StockPosition) string {
+	var sb strings.Builder
+	if position != nil && position.Shares > 0 {
+		currentPrice := 0.0
+		symbol := ""
+		name := ""
+		if stock != nil {
+			currentPrice = stock.Price
+			symbol = strings.TrimSpace(stock.Symbol)
+			name = strings.TrimSpace(stock.Name)
+		}
+		stockLabel := strings.TrimSpace(strings.TrimSpace(name + " " + symbol))
+		if stockLabel == "" {
+			stockLabel = "当前标的"
+		}
+		pnlText := "暂无盈亏数据"
+		if currentPrice > 0 {
+			pnlPerShare := currentPrice - position.CostPrice
+			pnlTotal := pnlPerShare * float64(position.Shares)
+			pnlRatio := 0.0
+			if position.CostPrice > 0 {
+				pnlRatio = pnlPerShare / position.CostPrice * 100
+			}
+			pnlText = fmt.Sprintf("浮盈亏 %.2f（%.2f%%）", pnlTotal, pnlRatio)
+		}
+		sb.WriteString("【用户持仓】\n")
+		sb.WriteString(fmt.Sprintf("%s：持有 %d 股，成本价 %.2f，现价 %.2f，%s。\n", stockLabel, position.Shares, position.CostPrice, currentPrice, pnlText))
+	}
+	if strings.TrimSpace(coreContext) != "" {
+		sb.WriteString("【核心数据包】\n")
+		sb.WriteString(coreContext)
+		sb.WriteString("\n")
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func (s *Service) fallbackAgents(all []models.AgentConfig, limit int) []models.AgentConfig {
+	if limit <= 0 {
+		limit = 1
+	}
+
+	result := make([]models.AgentConfig, 0, limit)
+	for _, agent := range all {
+		if !agent.Enabled {
+			continue
+		}
+		result = append(result, agent)
+		if len(result) >= limit {
+			break
+		}
+	}
+	return result
+}
+
+func (s *Service) runSecondReviewRound(
+	ctx context.Context,
+	defaultAIConfig *models.AIConfig,
+	stock *models.Stock,
+	query string,
+	selectedAgents []models.AgentConfig,
+	history []DiscussionEntry,
+	position *models.StockPosition,
+	progressCallback ProgressCallback,
+	meetingMode string,
+) []ChatResponse {
+	if len(history) == 0 || len(selectedAgents) == 0 {
+		return nil
+	}
+
+	reviewQuery := buildSecondReviewQuery(query)
+	responses := make([]ChatResponse, 0, len(selectedAgents))
+	for _, agentCfg := range selectedAgents {
+		if ctx.Err() != nil {
+			break
+		}
+
+		agentAIConfig := s.resolveAgentAIConfig(&agentCfg, defaultAIConfig)
+		agentLLM, err := s.modelFactory.CreateModel(ctx, agentAIConfig)
+		if err != nil {
+			log.Error("create revision agent LLM error: %v", err)
+			continue
+		}
+		builder := s.createBuilder(agentLLM, agentAIConfig)
+
+		emitProgress(progressCallback, ProgressEvent{
+			Type: "agent_start", AgentID: agentCfg.ID, AgentName: agentCfg.Name, Detail: "二轮复议",
+		})
+		previousContext := s.buildPreviousContext(history)
+		content, err := retryRun(ctx, s.retryCount, func() (string, error) {
+			agentCtx, cancel := context.WithTimeout(ctx, AgentTimeout)
+			defer cancel()
+			return s.runSingleAgent(agentCtx, builder, &agentCfg, stock, reviewQuery, previousContext, "", progressCallback, position)
+		})
+		emitProgress(progressCallback, ProgressEvent{
+			Type: "agent_done", AgentID: agentCfg.ID, AgentName: agentCfg.Name,
+		})
+		if err != nil || strings.TrimSpace(content) == "" {
+			continue
+		}
+
+		responses = append(responses, ChatResponse{
+			AgentID:     agentCfg.ID,
+			AgentName:   agentCfg.Name,
+			Role:        agentCfg.Role,
+			Content:     content,
+			Round:       2,
+			MsgType:     "opinion",
+			MeetingMode: meetingMode,
+		})
+	}
+	return responses
+}
+
+func buildSecondReviewQuery(query string) string {
+	return "请基于用户原始问题和前面专家的观点进行一次简短复议。\n" +
+		"如果你认为原判断成立，请明确说明并补充最关键的前提；如果需要修正，请直接给出修正后的结论和原因。\n" +
+		"避免重复第一轮内容，控制在120字以内。\n\n用户问题：" + query
+}
+
+func summaryRound(history []DiscussionEntry) int {
+	if len(history) == 0 {
+		return 2
+	}
+	if history[len(history)-1].Round >= 2 {
+		return history[len(history)-1].Round + 1
+	}
+	return 2
 }
