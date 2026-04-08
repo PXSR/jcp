@@ -143,7 +143,7 @@ func (f *ModelFactory) createOpenAIModel(config *models.AIConfig) (model.LLM, er
 		Transport: &uaTransport{base: proxy.GetManager().GetTransport()},
 	}
 
-	return openai.NewOpenAIModel(config.ModelName, openaiCfg, config.NoSystemRole), nil
+	return openai.NewOpenAIModel(config.ModelName, openaiCfg, config.NoSystemRole, string(config.TokenParamMode)), nil
 }
 
 // normalizeAnthropicBaseURL 规范化 Anthropic BaseURL
@@ -240,16 +240,16 @@ func (f *ModelFactory) detectOpenAISystemRole(ctx context.Context, config *model
 	} else {
 		endpoint = strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 		body = map[string]any{
-			"model":      config.ModelName,
-			"max_tokens": 30,
+			"model": config.ModelName,
 			"messages": []map[string]string{
 				{"role": "system", "content": systemPrompt},
 				{"role": "user", "content": "Please follow the system instruction."},
 			},
 		}
+		setOpenAIChatTokenLimit(body, config.ModelName, config.TokenParamMode, 30)
 	}
 
-	respBody, statusCode, err := f.doProbeRequest(ctx, endpoint, config.APIKey, transport, body)
+	respBody, statusCode, err := f.doOpenAIProbeRequest(ctx, endpoint, config, transport, body, 30)
 	if err != nil {
 		log.Warn("模型 [%s] system role 探测请求失败: %v", config.ModelName, err)
 		return false
@@ -367,38 +367,22 @@ func (f *ModelFactory) testOpenAIConnection(ctx context.Context, config *models.
 		// 使用 Chat Completions API 端点测试
 		endpoint = strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 		body = map[string]interface{}{
-			"model":      config.ModelName,
-			"max_tokens": 1,
-			"messages":   []map[string]string{{"role": "user", "content": "hi"}},
+			"model":    config.ModelName,
+			"messages": []map[string]string{{"role": "user", "content": "hi"}},
 		}
+		setOpenAIChatTokenLimit(body, config.ModelName, config.TokenParamMode, 1)
 	}
 
-	jsonBody, err := json.Marshal(body)
+	respBody, statusCode, err := f.doOpenAIProbeRequest(ctx, endpoint, config, transport, body, 1)
 	if err != nil {
-		return fmt.Errorf("请求构造失败: %w", err)
+		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(string(jsonBody)))
-	if err != nil {
-		return fmt.Errorf("请求创建失败: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+config.APIKey)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) CherryStudio/1.2.4 Chrome/126.0.6478.234 Electron/31.7.6 Safari/537.36")
-
-	client := &http.Client{Transport: transport}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("连接失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
+	if statusCode == http.StatusOK {
 		return nil
 	}
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+	return fmt.Errorf("HTTP %d: %s", statusCode, string(respBody))
 }
 
 // testGeminiConnection 测试 Gemini 连通性
@@ -509,6 +493,33 @@ func (f *ModelFactory) doProbeRequest(ctx context.Context, endpoint, apiKey stri
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	return respBody, resp.StatusCode, nil
+}
+
+func (f *ModelFactory) doOpenAIProbeRequest(
+	ctx context.Context,
+	endpoint string,
+	config *models.AIConfig,
+	transport http.RoundTripper,
+	body map[string]any,
+	limit int,
+) ([]byte, int, error) {
+	respBody, statusCode, err := f.doProbeRequest(ctx, endpoint, config.APIKey, transport, body)
+	if err != nil || config.UseResponses {
+		return respBody, statusCode, err
+	}
+	if !isOpenAIChatTokenParamRetryable(statusCode, respBody) {
+		return respBody, statusCode, err
+	}
+
+	resolvedMode := openai.ResolveTokenParamMode(config.ModelName, string(config.TokenParamMode))
+	retryBody := make(map[string]any, len(body))
+	for key, value := range body {
+		retryBody[key] = value
+	}
+	setOpenAIChatTokenLimitWithResolvedMode(retryBody, alternateOpenAIChatTokenParamMode(resolvedMode), limit)
+
+	log.Warn("模型 [%s] 探测请求 token 参数不兼容，切换参数名后重试", config.ModelName)
+	return f.doProbeRequest(ctx, endpoint, config.APIKey, transport, retryBody)
 }
 
 // extractReplyText 从 API 响应 JSON 中提取模型回复文本

@@ -25,18 +25,20 @@ var (
 
 // OpenAIModel 实现 model.LLM 接口，支持 thinking 模型
 type OpenAIModel struct {
-	Client       *openai.Client
-	ModelName    string
-	NoSystemRole bool // 不支持 system role 时需要降级处理
+	Client         *openai.Client
+	ModelName      string
+	TokenParamMode string
+	NoSystemRole   bool // 不支持 system role 时需要降级处理
 }
 
 // NewOpenAIModel 创建 OpenAI 模型
-func NewOpenAIModel(modelName string, cfg openai.ClientConfig, noSystemRole bool) *OpenAIModel {
+func NewOpenAIModel(modelName string, cfg openai.ClientConfig, noSystemRole bool, tokenParamMode string) *OpenAIModel {
 	client := openai.NewClientWithConfig(cfg)
 	return &OpenAIModel{
-		Client:       client,
-		ModelName:    modelName,
-		NoSystemRole: noSystemRole,
+		Client:         client,
+		ModelName:      modelName,
+		TokenParamMode: tokenParamMode,
+		NoSystemRole:   noSystemRole,
 	}
 }
 
@@ -56,13 +58,20 @@ func (o *OpenAIModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 // generate 非流式生成
 func (o *OpenAIModel) generate(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		openaiReq, err := toOpenAIChatCompletionRequest(req, o.ModelName, o.NoSystemRole)
+		openaiReq, err := toOpenAIChatCompletionRequest(req, o.ModelName, o.NoSystemRole, o.TokenParamMode)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 
 		resp, err := o.Client.CreateChatCompletion(ctx, openaiReq)
+		if err != nil {
+			retryReq, ok := buildCompatRetryRequest(openaiReq, err)
+			if ok {
+				modelLog.Warn("模型 [%s] 首次请求参数不兼容，已自动调整后重试: %v", o.ModelName, err)
+				resp, err = o.Client.CreateChatCompletion(ctx, retryReq)
+			}
+		}
 		if err != nil {
 			yield(nil, err)
 			return
@@ -81,7 +90,7 @@ func (o *OpenAIModel) generate(ctx context.Context, req *model.LLMRequest) iter.
 // generateStream 流式生成
 func (o *OpenAIModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
-		openaiReq, err := toOpenAIChatCompletionRequest(req, o.ModelName, o.NoSystemRole)
+		openaiReq, err := toOpenAIChatCompletionRequest(req, o.ModelName, o.NoSystemRole, o.TokenParamMode)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -89,6 +98,14 @@ func (o *OpenAIModel) generateStream(ctx context.Context, req *model.LLMRequest)
 		openaiReq.Stream = true
 
 		stream, err := o.Client.CreateChatCompletionStream(ctx, openaiReq)
+		if err != nil {
+			retryReq, ok := buildCompatRetryRequest(openaiReq, err)
+			if ok {
+				retryReq.Stream = true
+				modelLog.Warn("模型 [%s] 首次流式请求参数不兼容，已自动调整后重试: %v", o.ModelName, err)
+				stream, err = o.Client.CreateChatCompletionStream(ctx, retryReq)
+			}
+		}
 		if err != nil {
 			yield(nil, err)
 			return
